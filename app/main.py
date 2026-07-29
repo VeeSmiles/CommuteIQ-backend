@@ -188,13 +188,15 @@ def estimate_congestion(time_str: Optional[str]) -> str:
 # ── Geocoding ─────────────────────────────────────────────────
 
 async def geocode_place(place: str, city: str) -> dict:
+    country = get_country(city)
+    countrycodes = "ke" if country == "kenya" else "ng"
     try:
         async with httpx.AsyncClient(
-            timeout=6, headers={"User-Agent": "SmartCommuteAI/2.0"}
+            timeout=6, headers={"User-Agent": "CommuteIQ/2.0"}
         ) as client:
             r = await client.get(
                 "https://nominatim.openstreetmap.org/search",
-                params={"q": f"{place}, {city}", "format": "json", "limit": 1},
+                params={"q": place, "format": "json", "limit": 1, "countrycodes": countrycodes},
             )
             results = r.json()
             if results:
