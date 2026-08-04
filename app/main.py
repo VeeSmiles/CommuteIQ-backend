@@ -62,18 +62,22 @@ app.add_middleware(
 MODELS_DIR = Path(__file__).parent.parent / "models"
 
 def load_models():
-    try:
-        travel_model      = joblib.load(MODELS_DIR / "travel_time_model.pkl")
-        quality_model     = joblib.load(MODELS_DIR / "commute_quality_model.pkl")
-        safety_scores     = joblib.load(MODELS_DIR / "safety_scores.pkl")
-        encoders          = joblib.load(MODELS_DIR / "encoders.pkl")
-        road_quality      = joblib.load(MODELS_DIR / "road_quality.pkl")
-        transport_modes   = joblib.load(MODELS_DIR / "transport_modes.pkl")
-        print("✅ All models loaded")
-        return travel_model, quality_model, safety_scores, encoders, road_quality, transport_modes
-    except FileNotFoundError as e:
-        print(f"⚠️  Model not found: {e}. Run train_models.py first.")
-        return None, None, None, None, None, None
+    def try_load(filename):
+        try:
+            return joblib.load(MODELS_DIR / filename)
+        except FileNotFoundError:
+            print(f"⚠️  {filename} not found — using fallback logic instead")
+            return None
+
+    travel_model    = try_load("travel_time_model.pkl")
+    quality_model   = try_load("commute_quality_model.pkl")
+    safety_scores   = try_load("safety_scores.pkl")
+    encoders        = try_load("encoders.pkl")
+    road_quality    = try_load("road_quality.pkl")
+    transport_modes = try_load("transport_modes.pkl")
+
+    print("✅ Model loading complete (see warnings above for any using fallback logic)")
+    return travel_model, quality_model, safety_scores, encoders, road_quality, transport_modes
 
 (travel_model, quality_model,
  safety_scores, encoders,
