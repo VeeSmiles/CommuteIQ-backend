@@ -191,12 +191,18 @@ def estimate_congestion(time_str: Optional[str]) -> str:
 
 # ── Geocoding ─────────────────────────────────────────────────
 
+_geocode_cache = {}
+
 async def geocode_place(place: str, city: str) -> dict:
+    cache_key = (place.strip().lower(), city.lower())
+    if cache_key in _geocode_cache:
+        return _geocode_cache[cache_key]
+
     country = get_country(city)
     countrycodes = "ke" if country == "kenya" else "ng"
     try:
         async with httpx.AsyncClient(
-            timeout=6, headers={"User-Agent": "CommuteIQ/2.0"}
+            timeout=6, headers={"User-Agent": "SmartCommuteAI/2.0"}
         ) as client:
             r = await client.get(
                 "https://nominatim.openstreetmap.org/search",
@@ -204,23 +210,29 @@ async def geocode_place(place: str, city: str) -> dict:
             )
             results = r.json()
             if results:
-                return {"lat": float(results[0]["lat"]), "lng": float(results[0]["lon"])}
+                coords = {"lat": float(results[0]["lat"]), "lng": float(results[0]["lon"])}
+                _geocode_cache[cache_key] = coords
+                return coords
     except Exception:
         pass
-    return CITY_COORDS.get(city.lower(), {"lat": 6.5244, "lng": 3.3792})
 
+    fallback = CITY_COORDS.get(city.lower(), {"lat": 6.5244, "lng": 3.3792})
+    _geocode_cache[cache_key] = fallback
+    return fallback
 
 # ── ML prediction ─────────────────────────────────────────────
+
+MIN_SPEED_KMH = {"driving": 15, "rideshare": 15, "matatu": 8, "danfo": 8, "boda": 10, "walking": 3}
+MAX_SPEED_KMH = {"driving": 80, "rideshare": 80, "matatu": 50, "danfo": 50, "boda": 60, "walking": 6}
 
 def predict_travel_time(
     distance_km: float, congestion: str, weather: str,
     alternatives: int, mode: str, city: str, rq_score: float
 ) -> float:
-    """Predict travel time using ML model with mode + city + road quality."""
-    cmap = encoders["congestion_map"] if encoders else {"Low":0,"Medium":1,"High":2}
-    wmap = encoders["weather_map"]    if encoders else {"Clear":0,"Cloudy":1,"Foggy":2,"Rainy":3}
-    mmap = encoders.get("mode_map",   {}) if encoders else {}
-    cimap= encoders.get("city_map",   {}) if encoders else {}
+    cmap  = encoders["congestion_map"] if encoders else {"Low":0,"Medium":1,"High":2}
+    wmap  = encoders["weather_map"]    if encoders else {"Clear":0,"Cloudy":1,"Foggy":2,"Rainy":3}
+    mmap  = encoders.get("mode_map",   {}) if encoders else {}
+    cimap = encoders.get("city_map",   {}) if encoders else {}
 
     c_enc   = cmap.get(congestion, 1)
     w_enc   = wmap.get(weather, 0)
@@ -231,14 +243,20 @@ def predict_travel_time(
     features = [[distance_km, c_enc, w_enc, alternatives, is_peak, m_enc, ci_enc, rq_score]]
 
     if travel_model is None:
-        # Fallback formula using transport_modes
-        return _formula_travel_time(distance_km, congestion, weather, mode, city)
+        result = _formula_travel_time(distance_km, congestion, weather, mode, city)
+    else:
+        try:
+            result = round(float(travel_model.predict(features)[0]), 1)
+        except Exception:
+            result = _formula_travel_time(distance_km, congestion, weather, mode, city)
 
-    try:
-        return round(float(travel_model.predict(features)[0]), 1)
-    except Exception:
-        return _formula_travel_time(distance_km, congestion, weather, mode, city)
-
+    # Emergency sanity clamp: no prediction can be physically impossible,
+    # regardless of what the model or formula produced.
+    min_speed = MIN_SPEED_KMH.get(mode.lower(), 10)
+    max_speed = MAX_SPEED_KMH.get(mode.lower(), 60)
+    slowest_time = (distance_km / min_speed) * 60
+    fastest_time = (distance_km / max_speed) * 60
+    return round(max(fastest_time, min(result, slowest_time)), 1)
 
 def _formula_travel_time(distance_km, congestion, weather, mode, city):
     """Formula fallback when model unavailable."""
