@@ -7,22 +7,37 @@ import httpx
 
 OSRM_URL = "https://router.project-osrm.org/route/v1"
 
+# OSRM only has routing profiles for driving, walking, and cycling.
+# There is no matatu/danfo/okada profile because informal transit is not
+# mapped as a routable network anywhere. We use the driving profile as the
+# physical-road baseline for all motorised modes, then apply mode-specific
+# speed multipliers from transport_modes.pkl (see main.py _formula_travel_time).
 OSRM_PROFILE = {
-    "driving": "driving",
-    "walking": "foot",
-    "boda": "driving",
-    "matatu": "driving",
-    "danfo": "driving",
+    # Nigeria modes
+    "driving":   "driving",
+    "danfo":     "driving",
+    "brt":       "driving",   # dedicated lane but still on roads
+    "okada":     "driving",
+    "keke":      "driving",
+    "rideshare": "driving",
+    "walking":   "foot",
+    # Kenya modes
+    "matatu":    "driving",
+    "bus":       "driving",
+    "boda_boda": "driving",
+    "boda":      "driving",   # alias
+    "tuk_tuk":   "driving",
+    "taxi":      "driving",
 }
 
 
 async def get_route(origin: dict, destination: dict, mode: str) -> dict:
-    profile = OSRM_PROFILE.get(mode, "driving")
-    coords = f"{origin['lng']},{origin['lat']};{destination['lng']},{destination['lat']}"
-    url = f"{OSRM_URL}/{profile}/{coords}"
+    profile = OSRM_PROFILE.get(mode.lower(), "driving")
+    coords  = f"{origin['lng']},{origin['lat']};{destination['lng']},{destination['lat']}"
+    url     = f"{OSRM_URL}/{profile}/{coords}"
 
     async with httpx.AsyncClient(timeout=10) as client:
-        res = await client.get(url, params={"overview": "full", "geometries": "geojson"})
+        res = await client.get(url, params={"overview": "false"})
         res.raise_for_status()
         data = res.json()
 
@@ -30,13 +45,7 @@ async def get_route(origin: dict, destination: dict, mode: str) -> dict:
         raise ValueError("No route found between those points")
 
     route = data["routes"][0]
-
-    # OSRM gives [lng, lat] pairs; Leaflet (the map library) wants [lat, lng] —
-    # this swaps them so the frontend can use it directly.
-    geometry = [[lat, lng] for lng, lat in route["geometry"]["coordinates"]]
-
     return {
-        "distance_km": route["distance"] / 1000,
-        "base_duration_minutes": route["duration"] / 60,
-        "route_geometry": geometry,
+        "distance_km":          route["distance"] / 1000,
+        "base_duration_minutes": route["duration"] / 60,  # free-flow, congestion applied in main.py
     }
