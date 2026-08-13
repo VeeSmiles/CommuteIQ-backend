@@ -561,16 +561,6 @@ async def get_modes(city: str):
     ]
     return ModesResponse(city=city, country=country, modes=modes_list)
 
-@app.get("/debug/paths")
-async def debug_paths():
-    return {
-        "cwd": os.getcwd(),
-        "models_dir_resolved": str(MODELS_DIR),
-        "models_at_root": os.listdir("models") if os.path.exists("models") else "NOT FOUND",
-        "models_in_app": os.listdir("app/models") if os.path.exists("app/models") else "NOT FOUND",
-        "models_parent": os.listdir("../models") if os.path.exists("../models") else "NOT FOUND",
-    }
-
 @app.post("/predict", response_model=PredictResponse)
 async def predict(req: PredictRequest):
     """Main prediction endpoint."""
