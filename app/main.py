@@ -23,6 +23,9 @@ import os
 import time
 import joblib
 from datetime import datetime
+from restriction_data    import get_restriction, TRANSPORT_RESTRICTIONS
+from live_intelligence   import get_route_intelligence
+from transit_data        import get_walk_to_transit, get_matatu_route, MATATU_ROUTES
 from weather_intelligence import (
     get_weather_trend, get_flood_risk,
     get_day_pattern, DAY_CONGESTION_MULT
@@ -62,22 +65,18 @@ app.add_middleware(
 MODELS_DIR = Path(__file__).parent.parent / "models"
 
 def load_models():
-    def try_load(filename):
-        try:
-            return joblib.load(MODELS_DIR / filename)
-        except FileNotFoundError:
-            print(f"⚠️  {filename} not found — using fallback logic instead")
-            return None
-
-    travel_model    = try_load("travel_time_model.pkl")
-    quality_model   = try_load("commute_quality_model.pkl")
-    safety_scores   = try_load("safety_scores.pkl")
-    encoders        = try_load("encoders.pkl")
-    road_quality    = try_load("road_quality.pkl")
-    transport_modes = try_load("transport_modes.pkl")
-
-    print("✅ Model loading complete (see warnings above for any using fallback logic)")
-    return travel_model, quality_model, safety_scores, encoders, road_quality, transport_modes
+    try:
+        travel_model      = joblib.load(MODELS_DIR / "travel_time_model.pkl")
+        quality_model     = joblib.load(MODELS_DIR / "commute_quality_model.pkl")
+        safety_scores     = joblib.load(MODELS_DIR / "safety_scores.pkl")
+        encoders          = joblib.load(MODELS_DIR / "encoders.pkl")
+        road_quality      = joblib.load(MODELS_DIR / "road_quality.pkl")
+        transport_modes   = joblib.load(MODELS_DIR / "transport_modes.pkl")
+        print("✅ All models loaded")
+        return travel_model, quality_model, safety_scores, encoders, road_quality, transport_modes
+    except FileNotFoundError as e:
+        print(f"⚠️  Model not found: {e}. Run train_models.py first.")
+        return None, None, None, None, None, None
 
 (travel_model, quality_model,
  safety_scores, encoders,
@@ -98,34 +97,97 @@ CITY_COORDS = {
     "kisumu":       {"lat": -0.0917, "lng": 34.7680},
     "nakuru":       {"lat": -0.3031, "lng": 36.0800},
     "eldoret":      {"lat": 0.5143,  "lng": 35.2698},
-    "kiambu": {"lat": -1.1714, "lng": 36.8356},
-    "machakos": {"lat": -1.5177, "lng": 37.2634},
-    "murang'a": {"lat": -0.7839, "lng": 37.1502},
-    "kilifi": {"lat": -3.6305, "lng": 39.8499},
-    "meru": {"lat": 0.0470, "lng": 37.6559},
-    "nyeri": {"lat": -0.4201, "lng": 36.9476},
-    "kajiado": {"lat": -1.8524, "lng": 36.7820},
-    "kirinyaga": {"lat": -0.6591, "lng": 37.3826},
-    "narok": {"lat": -1.0833, "lng": 35.8711},
-    "embu": {"lat": -0.5310, "lng": 37.4500},
-    "kisii": {"lat": -0.6698, "lng": 34.7658},
-    "homa bay": {"lat": -0.5273, "lng": 34.4571},
-    "kericho": {"lat": -0.3689, "lng": 35.2861},
-    "nyandarua": {"lat": -0.2716, "lng": 36.3789},
-    "kakamega": {"lat": 0.2827, "lng": 34.7519},
-    "makueni": {"lat": -1.7833, "lng": 37.6333},
+    "asaba":        {"lat": 6.1986,  "lng": 6.7322},
+    "benin city":   {"lat": 6.3350,  "lng": 5.6037},
 }
 
-KENYA_CITIES = ["nairobi","mombasa","kisumu","nakuru","eldoret","kiambu","machakos",
-                "murang'a","kilifi","meru","nyeri","kajiado","kirinyaga","narok",
-                "embu","kisii","homa bay","kericho","nyandarua","kakamega","makueni"]
+# Nairobi suburb coordinates — used as fallback when Nominatim returns a
+# location suspiciously close to CBD for an area known to be further away.
+NAIROBI_SUBURB_COORDS = {
+    "kingeero":    {"lat": -1.2676, "lng": 36.7342},
+    "king'eero":   {"lat": -1.2676, "lng": 36.7342},
+    "uthiru":      {"lat": -1.2650, "lng": 36.7300},
+    "westlands":   {"lat": -1.2631, "lng": 36.8072},
+    "karen":       {"lat": -1.3430, "lng": 36.7050},
+    "langata":     {"lat": -1.3200, "lng": 36.7400},
+    "lang'ata":    {"lat": -1.3200, "lng": 36.7400},
+    "kasarani":    {"lat": -1.2206, "lng": 36.8956},
+    "ruiru":       {"lat": -1.1466, "lng": 36.9608},
+    "thika":       {"lat": -1.0322, "lng": 37.0693},
+    "kikuyu":      {"lat": -1.2470, "lng": 36.6720},
+    "embakasi":    {"lat": -1.3200, "lng": 36.9000},
+    "donholm":     {"lat": -1.3006, "lng": 36.8906},
+    "south b":     {"lat": -1.3072, "lng": 36.8338},
+    "south c":     {"lat": -1.3200, "lng": 36.8200},
+    "eastleigh":   {"lat": -1.2750, "lng": 36.8530},
+    "ngong":       {"lat": -1.3580, "lng": 36.6600},
+    "kitengela":   {"lat": -1.4750, "lng": 36.9600},
+    "rongai":      {"lat": -1.3960, "lng": 36.7450},
+    "mathare":     {"lat": -1.2550, "lng": 36.8650},
+    "huruma":      {"lat": -1.2500, "lng": 36.8600},
+    "githurai":    {"lat": -1.1950, "lng": 36.9100},
+}
+# Lagos area coordinates — fallback when Nominatim geocodes wrongly
+LAGOS_AREA_COORDS = {
+    "lekki":         {"lat": 6.4698,  "lng": 3.5852},
+    "ajah":          {"lat": 6.4633,  "lng": 3.5893},
+    "victoria island":{"lat": 6.4281, "lng": 3.4219},
+    "vi":            {"lat": 6.4281,  "lng": 3.4219},
+    "ikoyi":         {"lat": 6.4474,  "lng": 3.4341},
+    "surulere":      {"lat": 6.5017,  "lng": 3.3537},
+    "yaba":          {"lat": 6.5143,  "lng": 3.3785},
+    "mushin":        {"lat": 6.5504,  "lng": 3.3577},
+    "oshodi":        {"lat": 6.5563,  "lng": 3.3397},
+    "agege":         {"lat": 6.6134,  "lng": 3.3240},
+    "ojota":         {"lat": 6.5896,  "lng": 3.3926},
+    "maryland":      {"lat": 6.5694,  "lng": 3.3585},
+    "ketu":          {"lat": 6.5954,  "lng": 3.3850},
+    "ikorodu":       {"lat": 6.6194,  "lng": 3.5058},
+    "festac":        {"lat": 6.4683,  "lng": 3.2861},
+    "isale eko":     {"lat": 6.4569,  "lng": 3.3919},
+    "apapa":         {"lat": 6.4483,  "lng": 3.3599},
+    "alimosho":      {"lat": 6.6167,  "lng": 3.2333},
+    "ikotun":        {"lat": 6.5306,  "lng": 3.2667},
+    "egbeda":        {"lat": 6.5717,  "lng": 3.2900},
+    "ipaja":         {"lat": 6.5894,  "lng": 3.2525},
+    "dopemu":        {"lat": 6.5833,  "lng": 3.2833},
+    "mile 2":        {"lat": 6.4750,  "lng": 3.3150},
+}
+
+# Asaba area coordinates (Delta State)
+ASABA_AREA_COORDS = {
+    "okpanam":          {"lat": 6.2167, "lng": 6.6833},
+    "ibusa":            {"lat": 6.1667, "lng": 6.6667},
+    "anwai":            {"lat": 6.1800, "lng": 6.7400},
+    "cable point":      {"lat": 6.2050, "lng": 6.7280},
+    "bonsaac":          {"lat": 6.2100, "lng": 6.7350},
+    "koka":             {"lat": 6.2200, "lng": 6.7500},
+    "nnebisi":          {"lat": 6.1990, "lng": 6.7350},
+    "summit":           {"lat": 6.2050, "lng": 6.7400},
+    "federal housing":  {"lat": 6.2000, "lng": 6.7300},
+    "millennium":       {"lat": 6.1950, "lng": 6.7250},
+}
+
+# Benin City area coordinates (Edo State)
+BENIN_AREA_COORDS = {
+    "gra":              {"lat": 6.3150, "lng": 5.6150},
+    "uselu":            {"lat": 6.3750, "lng": 5.6020},
+    "ugbowo":           {"lat": 6.3980, "lng": 5.6110},
+    "ring road":        {"lat": 6.3350, "lng": 5.6037},
+    "sapele road":      {"lat": 6.3200, "lng": 5.6200},
+    "airport road":     {"lat": 6.3000, "lng": 5.5800},
+    "ramat park":       {"lat": 6.3450, "lng": 5.6300},
+    "ikpoba hill":      {"lat": 6.3600, "lng": 5.6400},
+    "textile mill":     {"lat": 6.3500, "lng": 5.5900},
+    "upper mission":    {"lat": 6.3700, "lng": 5.6000},
+}
+
 
 def get_country(city: str) -> str:
-    if city.lower() in KENYA_CITIES:
-        return "kenya"
     if encoders:
         return encoders.get("city_to_country", {}).get(city.lower(), "nigeria")
-    return "nigeria"
+    kenya_cities = ["nairobi","mombasa","kisumu","nakuru","eldoret"]
+    return "kenya" if city.lower() in kenya_cities else "nigeria"
 
 def validate_mode_for_city(mode: str, city: str) -> tuple[bool, str]:
     """Check if mode is available in city. Returns (valid, suggestion)."""
@@ -191,48 +253,127 @@ def estimate_congestion(time_str: Optional[str]) -> str:
 
 # ── Geocoding ─────────────────────────────────────────────────
 
-_geocode_cache = {}
+# Cache geocoding results for the session — same origin/destination
+# queried by 8 modes shouldn't hit Nominatim 16 times.
+_geocode_cache: dict = {}
 
 async def geocode_place(place: str, city: str) -> dict:
-    cache_key = (place.strip().lower(), city.lower())
+    """Geocode a place name to lat/lng. For known Nairobi suburbs, validates
+    the result isn't suspiciously close to CBD when the area is known to be
+    further away — Nominatim sometimes resolves suburb names wrongly."""
+    import math, asyncio
+
+    cache_key   = f"{place.lower().strip()}|{city.lower().strip()}"
     if cache_key in _geocode_cache:
         return _geocode_cache[cache_key]
 
-    country = get_country(city)
-    countrycodes = "ke" if country == "kenya" else "ng"
+    # Respect Nominatim's 1 req/sec policy
+    await asyncio.sleep(0.25)
+
+    def dist_km(lat1, lng1, lat2, lng2):
+        dlat = (lat2-lat1)*math.pi/180; dlng = (lng2-lng1)*math.pi/180
+        a = math.sin(dlat/2)**2 + math.cos(lat1*math.pi/180)*math.cos(lat2*math.pi/180)*math.sin(dlng/2)**2
+        return 6371 * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+
+    # enrichPlace() in client.js sends "Kingeero, Nairobi" not "Kingeero".
+    # Extract just the place name before the comma so suburb lookups work.
+    place_lower = place.lower().strip().rstrip(",")
+    place_base  = place_lower.split(",")[0].strip()   # "kingeero, nairobi" → "kingeero"
+    city_lower  = city.lower().strip()
+
     try:
         async with httpx.AsyncClient(
-            timeout=6, headers={"User-Agent": "SmartCommuteAI/2.0"}
+            timeout=6, headers={"User-Agent": "CommuteIQ/2.0"}
         ) as client:
             r = await client.get(
                 "https://nominatim.openstreetmap.org/search",
-                params={"q": place, "format": "json", "limit": 1, "countrycodes": countrycodes},
+                params={"q": f"{place}, {city}", "format": "json", "limit": 1,
+                        "countrycodes": "ke" if city_lower in ["nairobi","mombasa","kisumu","nakuru","eldoret"] else "ng"},
             )
             results = r.json()
             if results:
-                coords = {"lat": float(results[0]["lat"]), "lng": float(results[0]["lon"])}
-                _geocode_cache[cache_key] = coords
-                return coords
+                rlat = float(results[0]["lat"])
+                rlng = float(results[0]["lon"])
+                # Nairobi suburb validation — uses place_base (not place_lower)
+                # because client.js enriches "Kingeero" to "Kingeero, Nairobi"
+                # before sending. Threshold 5km catches suburbs placed near CBD
+                # by Nominatim when the real suburb is 7-15km away.
+                if city_lower == "nairobi" and place_base in NAIROBI_SUBURB_COORDS:
+                    cbd    = CITY_COORDS["nairobi"]
+                    known  = NAIROBI_SUBURB_COORDS[place_base]
+                    r_cbd  = dist_km(rlat, rlng, cbd["lat"], cbd["lng"])
+                    k_cbd  = dist_km(known["lat"], known["lng"], cbd["lat"], cbd["lng"])
+                    if r_cbd < 5.0 and k_cbd > 3.0:
+                        result = known
+                        _geocode_cache[cache_key] = result
+                        return result
+
+                # Lagos suburb validation: reject result if Nominatim returns
+                # a location more than 15km from the known coordinates.
+                # Catches cases like "Ikoyi" resolving to Ojo LGA (Satellite Town
+                # area, ~3.22 lng) instead of Ikoyi GRA on Lagos Island (~3.43 lng).
+                if city_lower == "lagos":
+                    place_norm = place_base.replace("'", "")
+                    if place_norm in LAGOS_AREA_COORDS:
+                        known    = LAGOS_AREA_COORDS[place_norm]
+                        err_dist = dist_km(rlat, rlng, known["lat"], known["lng"])
+                        if err_dist > 15.0:
+                            # Nominatim found the wrong place — use known coords
+                            result = known
+                            _geocode_cache[cache_key] = result
+                            return result
+
+                result = {"lat": rlat, "lng": rlng}
+                _geocode_cache[cache_key] = result
+                return result
     except Exception:
         pass
 
-    fallback = CITY_COORDS.get(city.lower(), {"lat": 6.5244, "lng": 3.3792})
-    _geocode_cache[cache_key] = fallback
-    return fallback
+    # Known suburb fallback
+    if city_lower == "nairobi" and place_base in NAIROBI_SUBURB_COORDS:
+        result = NAIROBI_SUBURB_COORDS[place_base]
+        _geocode_cache[cache_key] = result
+        return result
+    if city_lower in ["lagos","abuja","kano","ibadan","port harcourt","enugu"]:
+        place_norm = place_base.replace("'","")
+        if place_norm in LAGOS_AREA_COORDS:
+            result = LAGOS_AREA_COORDS[place_norm]
+            _geocode_cache[cache_key] = result
+            return result
+    if city_lower == "asaba":
+        place_norm = place_base.replace("'","")
+        if place_norm in ASABA_AREA_COORDS:
+            result = ASABA_AREA_COORDS[place_norm]
+            _geocode_cache[cache_key] = result
+            return result
+    if city_lower == "benin city":
+        place_norm = place_base.replace("'","")
+        if place_norm in BENIN_AREA_COORDS:
+            result = BENIN_AREA_COORDS[place_norm]
+            _geocode_cache[cache_key] = result
+            return result
+    if city_lower in ["lagos","abuja","kano","ibadan","port harcourt","enugu"]:
+        place_norm = place_base.replace("'","")
+        if place_norm in LAGOS_AREA_COORDS:
+            result = LAGOS_AREA_COORDS[place_norm]
+            _geocode_cache[cache_key] = result
+            return result
+    result = CITY_COORDS.get(city_lower, {"lat": 6.5244, "lng": 3.3792})
+    _geocode_cache[cache_key] = result
+    return result
+
 
 # ── ML prediction ─────────────────────────────────────────────
-
-MIN_SPEED_KMH = {"driving": 15, "rideshare": 15, "matatu": 8, "danfo": 8, "boda": 10, "walking": 3}
-MAX_SPEED_KMH = {"driving": 80, "rideshare": 80, "matatu": 50, "danfo": 50, "boda": 60, "walking": 6}
 
 def predict_travel_time(
     distance_km: float, congestion: str, weather: str,
     alternatives: int, mode: str, city: str, rq_score: float
 ) -> float:
-    cmap  = encoders["congestion_map"] if encoders else {"Low":0,"Medium":1,"High":2}
-    wmap  = encoders["weather_map"]    if encoders else {"Clear":0,"Cloudy":1,"Foggy":2,"Rainy":3}
-    mmap  = encoders.get("mode_map",   {}) if encoders else {}
-    cimap = encoders.get("city_map",   {}) if encoders else {}
+    """Predict travel time using ML model with mode + city + road quality."""
+    cmap = encoders["congestion_map"] if encoders else {"Low":0,"Medium":1,"High":2}
+    wmap = encoders["weather_map"]    if encoders else {"Clear":0,"Cloudy":1,"Foggy":2,"Rainy":3}
+    mmap = encoders.get("mode_map",   {}) if encoders else {}
+    cimap= encoders.get("city_map",   {}) if encoders else {}
 
     c_enc   = cmap.get(congestion, 1)
     w_enc   = wmap.get(weather, 0)
@@ -242,21 +383,23 @@ def predict_travel_time(
 
     features = [[distance_km, c_enc, w_enc, alternatives, is_peak, m_enc, ci_enc, rq_score]]
 
-    if travel_model is None:
-        result = _formula_travel_time(distance_km, congestion, weather, mode, city)
-    else:
-        try:
-            result = round(float(travel_model.predict(features)[0]), 1)
-        except Exception:
-            result = _formula_travel_time(distance_km, congestion, weather, mode, city)
+    # Use formula for city trips (< 50 km).
+    # The ML model was trained on Nigerian intercity highway data (Lagos→Kaduna
+    # etc.) and dramatically overcalculates short urban commutes — a 12km danfo
+    # trip returned 131 min instead of ~44 min. The transport_modes.pkl speed
+    # profiles are calibrated for city-level travel and give accurate results.
+    # Reserve ML for longer routes where intercity training is appropriate.
+    if distance_km < 50:
+        return _formula_travel_time(distance_km, congestion, weather, mode, city)
 
-    # Emergency sanity clamp: no prediction can be physically impossible,
-    # regardless of what the model or formula produced.
-    min_speed = MIN_SPEED_KMH.get(mode.lower(), 10)
-    max_speed = MAX_SPEED_KMH.get(mode.lower(), 60)
-    slowest_time = (distance_km / min_speed) * 60
-    fastest_time = (distance_km / max_speed) * 60
-    return round(max(fastest_time, min(result, slowest_time)), 1)
+    if travel_model is None:
+        return _formula_travel_time(distance_km, congestion, weather, mode, city)
+
+    try:
+        return round(float(travel_model.predict(features)[0]), 1)
+    except Exception:
+        return _formula_travel_time(distance_km, congestion, weather, mode, city)
+
 
 def _formula_travel_time(distance_km, congestion, weather, mode, city):
     """Formula fallback when model unavailable."""
@@ -267,7 +410,20 @@ def _formula_travel_time(distance_km, congestion, weather, mode, city):
         mode_data = transport_modes.get(country, {}).get(mode.lower(),
                     transport_modes.get(country, {}).get("driving", {}))
         speeds    = mode_data.get("avg_speed_kmh", {"urban": 30})
-        base_speed = list(speeds.values())[min(2, len(speeds)-1)]
+        # Distance-based speed selection:
+        # Short urban trips use the slowest (residential) speed.
+        # Medium suburban routes use middle speed.
+        # Long highway routes use the fastest speed.
+        # This fixes the Thika matatu showing 5h instead of 1h45min.
+        speed_vals = list(speeds.values())
+        if distance_km > 20 and len(speed_vals) >= 1:
+            base_speed = speed_vals[0]         # highway speed
+        elif distance_km > 8 and len(speed_vals) >= 2:
+            base_speed = speed_vals[1]         # primary road speed
+        else:
+            base_speed = min(speed_vals)       # urban/residential speed
+        if not speed_vals:
+            base_speed = 30.0
 
         peak_m = mode_data.get("peak_multiplier", 0.6)
         rain_m = mode_data.get("rain_multiplier", 0.8)
@@ -333,20 +489,58 @@ def get_safety_score(city: str, mode: str) -> float:
     return round(min(100, max(0, base * mult)), 1)
 
 
+
+# Mode restrictions are loaded from restriction_data.py
+# which covers all cities in Nigeria and Kenya with sourced legal references.
+
 # ── Alternative mode suggestion ───────────────────────────────
 
 def suggest_alternative_mode(
     mode: str, city: str, congestion: str,
     weather: str, distance_km: float
 ) -> Optional[str]:
-    """Suggest a better mode given current conditions."""
+    """Suggest a better mode given current conditions and legal restrictions."""
     if not transport_modes:
         return None
     country      = get_country(city)
     country_modes= transport_modes.get(country, {})
-    current_mult = transport_modes.get("speed_multipliers", {}).get(mode.lower(), 1.0)
     rain         = weather in ["Rainy","Foggy"]
     high_traffic = congestion == "High"
+
+    # ── Legal restriction checks (highest priority) ───────────
+    # Uses restriction_data.py — covers Lagos, Abuja, Kano, Port Harcourt,
+    # Enugu, Ibadan (Nigeria) and Nairobi (Kenya) with sourced legal references.
+    restriction = get_restriction(mode.lower(), city.lower(), country)
+    if restriction:
+        status = restriction.get("status", "")
+        msg    = restriction.get("message", "")
+
+        if status == "BANNED_STATEWIDE":
+            return msg.format(dist=distance_km) if "{dist" in msg else msg
+
+        if status in ("BANNED", "BANNED_CITY_CENTRE", "BANNED_MAJOR_ROADS"):
+            max_km = restriction.get("max_direct_km", 5.0)
+            if distance_km > max_km:
+                return msg.format(dist=distance_km) if "{dist" in msg else msg
+
+        if status == "PARTIAL_BAN":
+            max_km = restriction.get("max_direct_km", 10.0)
+            if distance_km > max_km:
+                return msg.format(dist=distance_km) if "{dist" in msg else msg
+
+        if status == "TERMINUS_RESTRICTION":
+            # Matatu CBD restriction — always show if destination is likely CBD
+            return msg if msg else None
+
+        if status == "NIGHT_CURFEW":
+            # Only warn at night — check time
+            import datetime
+            hour = datetime.datetime.now().hour
+            curfew_start = int(restriction.get("curfew_start","22:30").split(":")[0])
+            curfew_end   = int(restriction.get("curfew_end","05:30").split(":")[0])
+            is_night = hour >= curfew_start or hour < curfew_end
+            if is_night:
+                return msg.format(dist=distance_km) if "{dist" in msg else msg
 
     # Walking distance warning
     if mode.lower() == "walking":
@@ -358,6 +552,17 @@ def suggest_alternative_mode(
             info  = country_modes.get(best, {})
             return (f"⚠️ {distance_km:.1f}km is too far to walk safely. "
                     f"Consider {info.get('emoji','')} {info.get('label', best)} instead.")
+
+    # Walk-to-transit suggestion when driving is stuck in High traffic
+    if mode.lower() in ["driving", "rideshare", "taxi"] and high_traffic:
+        walk_sug = get_walk_to_transit(
+            origin_lat=0, origin_lng=0,   # coords not available here — handled in v2/predict
+            city=city,
+            origin_name="",
+            travel_time_driving=travel_time if hasattr(travel_time, "__float__") else 60,
+            congestion=congestion,
+        )
+        # Handled with real coords in v2/predict — skip here
 
     # Okada/boda in rain warning
     if mode.lower() in ["okada","boda_boda","boda"] and rain:
@@ -380,11 +585,16 @@ def suggest_alternative_mode(
 def get_departure_advice(
     congestion: str, weather: str, travel_time: float, mode: str
 ) -> str:
+    MIN_SAVING = 4   # don't recommend waiting for less than 4 min saving
     if congestion == "High" and weather in ["Rainy","Foggy"]:
         saved = round(travel_time * 0.30)
+        if saved < MIN_SAVING:
+            return "Leave now — conditions are tough but the trip is short enough to go now."
         return f"Wait 20 min — leaving later could save ~{saved} min on this route."
     elif congestion == "High":
         saved = round(travel_time * 0.20)
+        if saved < MIN_SAVING:
+            return "Leave now — high congestion but the time saving from waiting is minimal."
         return f"Wait 15 min — conditions may ease and save ~{saved} min."
     elif weather in ["Rainy","Foggy"]:
         return "Leave now but allow extra time — weather is reducing speeds."
@@ -439,6 +649,16 @@ def generate_ai_explanation(
     elif rq_score > 70:
         lines.append(f"Road quality is good ({rq_score:.0f}/100).")
 
+    # Matatu route number tip — tells user which route to board
+    if mode.lower() == "matatu" and city.lower() in ["nairobi"]:
+        route_info = get_matatu_route(origin.split(",")[0].lower().strip(), city)
+        if route_info:
+            routes = "/".join(route_info["routes"])
+            lines.append(
+                f"🚐 Board Matatu Route {routes} from {route_info['stage']} "
+                f"via {route_info['via']}."
+            )
+
     # Mode-specific warning
     if mode.lower() in ["okada","boda_boda","boda"] and weather in ["Rainy","Foggy"]:
         lines.append(f"⚠️ {mode_label} in wet conditions carries elevated crash risk.")
@@ -472,6 +692,23 @@ def generate_ai_explanation(
 
 # ── Response models ───────────────────────────────────────────
 
+def calculate_arrival_time(time_str: Optional[str], travel_time_min: float) -> Optional[str]:
+    """Calculate arrival time from departure + travel duration."""
+    import datetime as _dt
+    try:
+        if time_str:
+            hour, minute = map(int, time_str.split(":"))
+        else:
+            now = _dt.datetime.now()
+            hour, minute = now.hour, now.minute
+        total    = hour * 60 + minute + int(travel_time_min)
+        arr_hour = (total // 60) % 24
+        arr_min  = total % 60
+        return f"{arr_hour:02d}:{arr_min:02d}"
+    except Exception:
+        return None
+
+
 class PredictResponse(BaseModel):
     travel_time_min:    float
     commute_quality:    str
@@ -488,7 +725,8 @@ class PredictResponse(BaseModel):
     mode_label:         Optional[str] = None
     mode_emoji:         Optional[str] = None
     alt_suggestion:     Optional[str] = None
-    route_geometry: Optional[List[List[float]]] = None
+    arrival_time:       Optional[str] = None
+    route_geometry:     Optional[list] = None   # [[lat,lng],...] for Leaflet Polyline
 
 class RecommendRequest(BaseModel):
     origin:      str
@@ -541,6 +779,12 @@ async def health():
             "privacy":           "Coordinates anonymized to 1.1km grid",
             "data_retention":    "Reports expire automatically by type",
         },
+        "live_intelligence": {
+            "tomtom_active":  bool(os.getenv("TOMTOM_API_KEY")),
+            "rss_feeds":      8,
+            "google_news":    True,
+            "note":           "Set TOMTOM_API_KEY env var on Render to activate real traffic flow. RSS + Google News active always.",
+        },
     }
 
 
@@ -560,6 +804,7 @@ async def get_modes(city: str):
         if isinstance(v, dict)
     ]
     return ModesResponse(city=city, country=country, modes=modes_list)
+
 
 @app.post("/predict", response_model=PredictResponse)
 async def predict(req: PredictRequest):
@@ -587,11 +832,13 @@ async def predict(req: PredictRequest):
     mode_emoji = mode_data.get("emoji", "")
 
     # 1. Route
+    route_geometry = None
     try:
         origin_coords = await geocode_place(req.origin, city)
         dest_coords   = await geocode_place(req.destination, city)
         route         = await get_route(origin_coords, dest_coords, mode)
         distance_km   = route["distance_km"]
+        route_geometry = route.get("route_geometry")
     except Exception:
         distance_km = 12.0   # reasonable urban fallback
 
@@ -658,6 +905,8 @@ async def predict(req: PredictRequest):
         mode_label=mode_label,
         mode_emoji=mode_emoji,
         alt_suggestion=alt_suggestion,
+        arrival_time=calculate_arrival_time(req.time, travel_time),
+        route_geometry=route_geometry,
     )
 
 
@@ -700,11 +949,18 @@ async def recommend(req: RecommendRequest):
             "score":        quality["score"],
         })
 
-    best   = min(windows, key=lambda w: w["travel_time"])
-    advice = (
-        f"Leave now" if best["offset_min"] == 0
-        else f"Wait {best['offset_min']} min — saves ~{windows[0]['travel_time'] - best['travel_time']:.0f} min"
-    )
+    best         = min(windows, key=lambda w: w["travel_time"])
+    now_time     = windows[0]["travel_time"]
+    best_saving  = now_time - best["travel_time"]
+
+    # Only recommend waiting if saving is worth the wait.
+    # < 8 min saving = not worth it. Tell the user to leave now.
+    MIN_SAVING_MINUTES = 8
+    if best["offset_min"] == 0 or best_saving < MIN_SAVING_MINUTES:
+        advice = "Leave now — conditions are good."
+        best   = windows[0]   # reset best to Now window
+    else:
+        advice = f"Wait {best['offset_min']} min — saves ~{best_saving:.0f} min on this route."
 
     return RecommendResponse(
         recommended_departure=advice,
@@ -798,7 +1054,12 @@ def calculate_confidence(
     Calculate prediction confidence score 0-100 with explanation.
     Judges love explainability — this is a key differentiator.
     """
-    score       = 50  # base confidence
+    # Start higher on weekends and clear weather — these are predictable.
+    # The 50 base caused 60% "Low confidence" on clear Saturdays with no
+    # reports, which felt wrong when all signals were favourable.
+    import datetime
+    is_weekend = datetime.datetime.now().weekday() >= 5
+    score      = 60 if is_weekend else 50  # base confidence
     contributors = []
 
     # Community reports boost confidence
@@ -989,9 +1250,10 @@ class PredictResponseV2(PredictResponse):
     weather_trend:       Optional[dict] = None
     flood_risk:          Optional[dict] = None
     day_pattern:         Optional[dict] = None
+    live_intelligence:   Optional[dict] = None   # TomTom + RSS + Google News data
+    # arrival_time inherited from PredictResponse
     privacy_note:        str = "CommuteIQ stores only anonymized trip data. No personally identifiable travel history is collected or required."
     ethical_note:        str = "CommuteIQ does not allow police checkpoint or individual tracking reports."
-    route_geometry: Optional[List[List[float]]] = None
 
 
 @app.post("/v2/predict", response_model=PredictResponseV2)
@@ -1023,26 +1285,42 @@ async def predict_v2(req: PredictRequest, user_id: Optional[str] = None):
     try:
         origin_coords = await geocode_place(req.origin, city)
         dest_coords   = await geocode_place(req.destination, city)
-        route         = await get_route(origin_coords, dest_coords, mode)
-        distance_km   = route["distance_km"]
-        route_geometry = route.get("route_geometry", [])
+        route          = await get_route(origin_coords, dest_coords, mode)
+        distance_km    = route["distance_km"]
+        route_geometry = route.get("route_geometry")
     except Exception:
-        distance_km = 12.0   # reasonable urban fallback
-        route_geometry = []
+        distance_km = 12.0
 
     # Weather
     coords       = CITY_COORDS.get(city, {"lat": 6.5244, "lng": 3.3792})
     weather_data = await get_weather(coords["lat"], coords["lng"])
     weather      = weather_data["label"]
 
-    # Congestion
-    congestion = estimate_congestion(req.time)
+    # ── Live Intelligence — TomTom + RSS News + Google News ──
+    # Runs all three sources concurrently. Falls back gracefully if any fail.
+    # If TOMTOM_API_KEY is not set, congestion falls back to time-of-day estimate.
+    try:
+        intel = await get_route_intelligence(
+            origin=req.origin,
+            destination=req.destination,
+            city=city,
+            lat=coords["lat"],
+            lng=coords["lng"],
+        )
+        congestion        = intel["congestion"]
+        live_intel_data   = intel
+    except Exception:
+        congestion        = estimate_congestion(req.time)
+        live_intel_data   = {"congestion": congestion, "incidents": [], "confidence_boost": 0, "data_sources": ["time_of_day_estimate"]}
 
-    # Community reports — with type-specific expiry
-    all_reports    = await list_reports(city)
-    active_reports = get_active_reports(all_reports, city)
-    incident_types = ["accident", "flood", "road_closure", "heavy_traffic"]
-    community_count= len([r for r in active_reports if r.get("type") in incident_types])
+    # Community reports — combine Supabase reports with live intelligence incidents
+    all_reports      = await list_reports(city)
+    active_reps      = get_active_reports(all_reports, city)
+    live_incidents   = live_intel_data.get("incidents", [])
+    incident_types   = ["accident", "flood", "road_closure", "heavy_traffic"]
+    # Merge: Supabase user reports + live intelligence incidents
+    all_incidents    = active_reps + live_incidents
+    community_count  = len([r for r in all_incidents if r.get("type") in incident_types])
 
     # Road quality
     rq_score = get_road_quality_score(city)
@@ -1052,8 +1330,21 @@ async def predict_v2(req: PredictRequest, user_id: Optional[str] = None):
     safety_score = get_safety_score(city, mode)
     quality      = get_commute_quality(congestion, weather, community_count, safety_score, mode, city, distance_km, rq_score)
 
-    # Confidence
-    confidence = calculate_confidence(community_count, weather, congestion, distance_km, rq_score, req.time)
+    # Confidence — boosted if live data sources are available
+    confidence       = calculate_confidence(community_count, weather, congestion, distance_km, rq_score, req.time)
+    conf_boost       = live_intel_data.get("confidence_boost", 0)
+    if conf_boost:
+        confidence["score"]    = min(98, confidence["score"] + conf_boost)
+        data_sources           = live_intel_data.get("data_sources", [])
+        if "TomTom live traffic" in data_sources:
+            confidence["contributors"].append("TomTom real-time traffic data")
+        if any("news" in s for s in data_sources):
+            confidence["contributors"].append("Live news intelligence")
+        confidence["summary"] = (
+            f"{confidence['emoji']} {confidence['label']} confidence "
+            f"({confidence['score']}%) — " +
+            ", ".join(confidence["contributors"][:3])
+        )
 
     # Route confidence
     route_conf = calculate_route_confidence(
@@ -1067,8 +1358,22 @@ async def predict_v2(req: PredictRequest, user_id: Optional[str] = None):
     # Demand balancer
     staggered = get_staggered_departure(user_id, congestion, travel_time, req.time)
 
-    # Alternative suggestion
+    # Alternative suggestion (mode restrictions + better mode tips)
     alt_suggestion = suggest_alternative_mode(mode, city, congestion, weather, distance_km)
+
+    # Walk-to-transit — when driving is stuck, suggest walking to transit hub
+    # Uses real origin coordinates for accurate walking distance calculation
+    if not alt_suggestion and mode.lower() in ["driving","rideshare","taxi"]:
+        walk_suggestion = get_walk_to_transit(
+            origin_lat   = origin_coords.get("lat", coords["lat"]),
+            origin_lng   = origin_coords.get("lng", coords["lng"]),
+            city         = city,
+            origin_name  = req.origin.split(",")[0].strip(),
+            travel_time_driving = travel_time,
+            congestion   = congestion,
+        )
+        if walk_suggestion:
+            alt_suggestion = walk_suggestion["suggestion"]
 
     # Weather intelligence — trend + flood risk + day pattern
     weather_trend = await get_weather_trend(coords["lat"], coords["lng"])
@@ -1080,10 +1385,11 @@ async def predict_v2(req: PredictRequest, user_id: Optional[str] = None):
     )
     day_pattern   = get_day_pattern(city, req.time)
 
-    # Apply day-of-week multiplier to travel time
-    day_mult     = day_pattern["congestion_mult"]
-    if congestion == "High":
-        travel_time = round(travel_time * day_mult, 1)
+    # Day-of-week congestion pattern — kept for AI explanation context only.
+    # NOT applied to travel_time because the formula already accounts for
+    # congestion level. Multiplying again would double-count peak-hour delay
+    # and produce absurdly long estimates (the "1h 40min" bug on danfo trips).
+    day_mult = day_pattern["congestion_mult"]
 
     # AI explanation
     ai_explanation = generate_ai_explanation(
@@ -1096,14 +1402,11 @@ async def predict_v2(req: PredictRequest, user_id: Optional[str] = None):
         rq_score=rq_score, alt_suggestion=alt_suggestion,
     )
 
-    # Append intelligence layers to explanation
-    ai_explanation += f" {confidence['summary']}."
-    if weather_trend["trend_type"] in ["rain_incoming", "clearing"]:
-        ai_explanation += f" {weather_trend['trend_message']}"
-    if flood_risk["warning"]:
-        ai_explanation += f" {flood_risk['warning']}"
-    if day_pattern["severity"] in ["High", "Low"]:
-        ai_explanation += f" {day_pattern['pattern_message']}"
+    # NOTE: confidence, day_pattern, weather_trend and flood_risk are
+    # returned as separate structured fields and displayed as dedicated
+    # cards in the frontend. Do NOT append them to ai_explanation here —
+    # that causes every piece to display twice in the UI.
+
 
     return PredictResponseV2(
         travel_time_min=travel_time,
@@ -1121,6 +1424,8 @@ async def predict_v2(req: PredictRequest, user_id: Optional[str] = None):
         mode_label=mode_label,
         mode_emoji=mode_emoji,
         alt_suggestion=alt_suggestion,
+        arrival_time=calculate_arrival_time(req.time, travel_time),
+        route_geometry=route_geometry,
         confidence=confidence,
         route_confidence=route_conf,
         staggered_departure=staggered if staggered["staggered"] else None,
@@ -1128,9 +1433,15 @@ async def predict_v2(req: PredictRequest, user_id: Optional[str] = None):
         weather_trend=weather_trend,
         flood_risk=flood_risk if flood_risk["risk"] != "Low" else None,
         day_pattern=day_pattern,
+        live_intelligence={
+            "sources":          live_intel_data.get("data_sources", ["time_of_day_estimate"]),
+            "is_live":          live_intel_data.get("incidents", []) != [] or live_intel_data.get("congestion_detail", {}).get("live", False),
+            "live_incidents":   len(live_intel_data.get("incidents", [])),
+            "tomtom_active":    live_intel_data.get("congestion_detail", {}).get("source") == "TomTom live traffic",
+            "flow_ratio":       live_intel_data.get("congestion_detail", {}).get("flow_ratio"),
+        },
         privacy_note="CommuteIQ stores only anonymized trip data. No personally identifiable travel history is collected or required.",
         ethical_note="CommuteIQ does not allow police checkpoint or individual tracking reports.",
-        route_geometry=route_geometry,
     )
 
 
