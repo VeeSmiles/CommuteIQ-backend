@@ -65,18 +65,22 @@ app.add_middleware(
 MODELS_DIR = Path(__file__).parent.parent / "models"
 
 def load_models():
-    try:
-        travel_model      = joblib.load(MODELS_DIR / "travel_time_model.pkl")
-        quality_model     = joblib.load(MODELS_DIR / "commute_quality_model.pkl")
-        safety_scores     = joblib.load(MODELS_DIR / "safety_scores.pkl")
-        encoders          = joblib.load(MODELS_DIR / "encoders.pkl")
-        road_quality      = joblib.load(MODELS_DIR / "road_quality.pkl")
-        transport_modes   = joblib.load(MODELS_DIR / "transport_modes.pkl")
-        print("✅ All models loaded")
-        return travel_model, quality_model, safety_scores, encoders, road_quality, transport_modes
-    except FileNotFoundError as e:
-        print(f"⚠️  Model not found: {e}. Run train_models.py first.")
-        return None, None, None, None, None, None
+    def try_load(filename):
+        try:
+            return joblib.load(MODELS_DIR / filename)
+        except FileNotFoundError:
+            print(f"⚠️  {filename} not found — using fallback logic instead")
+            return None
+
+    travel_model    = try_load("travel_time_model.pkl")
+    quality_model   = try_load("commute_quality_model.pkl")
+    safety_scores   = try_load("safety_scores.pkl")
+    encoders        = try_load("encoders.pkl")
+    road_quality    = try_load("road_quality.pkl")
+    transport_modes = try_load("transport_modes.pkl")
+
+    print("✅ Model loading complete (see warnings above for any using fallback logic)")
+    return travel_model, quality_model, safety_scores, encoders, road_quality, transport_modes
 
 (travel_model, quality_model,
  safety_scores, encoders,
@@ -287,7 +291,7 @@ async def geocode_place(place: str, city: str) -> dict:
         ) as client:
             r = await client.get(
                 "https://nominatim.openstreetmap.org/search",
-                params={"q": f"{place}, {city}", "format": "json", "limit": 1,
+                params={"q": place, "format": "json", "limit": 1,
                         "countrycodes": "ke" if city_lower in ["nairobi","mombasa","kisumu","nakuru","eldoret"] else "ng"},
             )
             results = r.json()
@@ -365,6 +369,9 @@ async def geocode_place(place: str, city: str) -> dict:
 
 # ── ML prediction ─────────────────────────────────────────────
 
+MIN_SPEED_KMH = {"driving": 15, "rideshare": 15, "matatu": 8, "danfo": 8, "boda": 10, "walking": 3}
+MAX_SPEED_KMH = {"driving": 80, "rideshare": 80, "matatu": 50, "danfo": 50, "boda": 60, "walking": 6}
+
 def predict_travel_time(
     distance_km: float, congestion: str, weather: str,
     alternatives: int, mode: str, city: str, rq_score: float
@@ -390,15 +397,23 @@ def predict_travel_time(
     # profiles are calibrated for city-level travel and give accurate results.
     # Reserve ML for longer routes where intercity training is appropriate.
     if distance_km < 50:
-        return _formula_travel_time(distance_km, congestion, weather, mode, city)
+        result = _formula_travel_time(distance_km, congestion, weather, mode, city)
+    elif travel_model is None:
+        result = _formula_travel_time(distance_km, congestion, weather, mode, city)
+    else:
+        try:
+            result = round(float(travel_model.predict(features)[0]), 1)
+        except Exception:
+            result = _formula_travel_time(distance_km, congestion, weather, mode, city)
 
-    if travel_model is None:
-        return _formula_travel_time(distance_km, congestion, weather, mode, city)
-
-    try:
-        return round(float(travel_model.predict(features)[0]), 1)
-    except Exception:
-        return _formula_travel_time(distance_km, congestion, weather, mode, city)
+    # Emergency sanity clamp: whatever produced `result` (model or formula),
+    # no prediction can be physically impossible. This is a safety net, not
+    # a replacement for the calibration work above.
+    min_speed = MIN_SPEED_KMH.get(mode.lower(), 10)
+    max_speed = MAX_SPEED_KMH.get(mode.lower(), 60)
+    slowest_time = (distance_km / min_speed) * 60
+    fastest_time = (distance_km / max_speed) * 60
+    return round(max(fastest_time, min(result, slowest_time)), 1)
 
 
 def _formula_travel_time(distance_km, congestion, weather, mode, city):
