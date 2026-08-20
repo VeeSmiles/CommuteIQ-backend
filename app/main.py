@@ -187,11 +187,22 @@ BENIN_AREA_COORDS = {
 }
 
 
+KENYA_CITIES = [
+    "nairobi", "mombasa", "kisumu", "nakuru", "eldoret", "kiambu", "machakos",
+    "murang'a", "kilifi", "meru", "nyeri", "kajiado", "kirinyaga", "narok",
+    "embu", "kisii", "homa bay", "kericho", "nyandarua", "kakamega", "makueni",
+]
+
 def get_country(city: str) -> str:
+    # Check the known Kenya city list FIRST, unconditionally — don't let a
+    # possibly-incomplete encoders["city_to_country"] mapping silently
+    # default Kenyan cities to Nigeria (this caused danfo/okada to show up
+    # for Kenya cities even though the dropdown said Kenya).
+    if city.lower() in KENYA_CITIES:
+        return "kenya"
     if encoders:
         return encoders.get("city_to_country", {}).get(city.lower(), "nigeria")
-    kenya_cities = ["nairobi","mombasa","kisumu","nakuru","eldoret"]
-    return "kenya" if city.lower() in kenya_cities else "nigeria"
+    return "nigeria"
 
 def validate_mode_for_city(mode: str, city: str) -> tuple[bool, str]:
     """Check if mode is available in city. Returns (valid, suggestion)."""
